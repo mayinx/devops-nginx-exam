@@ -1,0 +1,27 @@
+# === Security & Secrets (CRITICAL) ===
+# Never sync your private keys or passwords!
+deployments/nginx/certs/*.key
+deployments/nginx/certs/*.crt
+deployments/nginx/.htpasswd
+
+# === Docker Persistence ===
+# These contain the actual databases for Prometheus/Grafana
+prometheus_data/
+grafana_data/
+
+# === Python "Junk" ===
+# Local environment and cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+.pytest_cache/
+
+# === OS & IDE Files ===
+.DS_Store
+.vscode/
+.idea/
+*.swp
