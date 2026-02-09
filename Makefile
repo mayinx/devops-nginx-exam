@@ -212,3 +212,23 @@ test-rate-limit:
 		echo "FAIL: expected both 200 and 503 (ok=$$ok limited=$$limited)"; \
 		exit 1; \
 	fi
+
+## A/B smoke tests
+
+# Smoke test: default path (without debug header) hits v1 (no experiment header)
+test-ab-v1:
+	@curl -s -X POST "https://localhost/predict" \
+		--cacert ./deployments/nginx/certs/nginx.crt \
+		--user admin:admin \
+		-H "Content-Type: application/json" \
+		-d '{"sentence":"I love this!"}'; echo
+
+# Smoke test: debug header triggers v2 (debug path)
+test-ab-v2:
+	@curl -s -X POST "https://localhost/predict" \
+		--cacert ./deployments/nginx/certs/nginx.crt \
+		--user admin:admin \
+		-H "X-Experiment-Group: debug" \
+		-H "Content-Type: application/json" \
+		-d '{"sentence":"I love this!"}'; echo
+	

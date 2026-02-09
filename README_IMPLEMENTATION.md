@@ -856,3 +856,158 @@ test-rate-limit:
 ---
 
 
+---
+
+## 7. A/B Testing: Route to api-v2 only when `X-Experiment-Group: debug` is present
+
+### TL;DR (step specific): Quick reproduce (current milestone: header-based routing)
+
+~~~bash
+# Start stack
+make start-project
+
+# Default (no header) -> api-v1 (should behave like "normal" response)
+curl -s -X POST "https://localhost/predict" \
+  --cacert ./deployments/nginx/certs/nginx.crt \
+  --user admin:admin \
+  -H "Content-Type: application/json" \
+  -d '{"sentence":"I love this!"}'; echo
+
+# With header -> api-v2 ("debug" response)
+curl -s -X POST "https://localhost/predict" \
+  --cacert ./deployments/nginx/certs/nginx.crt \
+  --user admin:admin \
+  -H "X-Experiment-Group: debug" \
+  -H "Content-Type: application/json" \
+  -d '{"sentence":"I love this!"}'; echo
+
+# Watch routing behavior in logs (optional)
+docker compose -p mlops-exam logs -f api-v1
+docker compose -p mlops-exam logs -f api-v2
+docker compose -p mlops-exam logs -f nginx
+
+make stop-project
+~~~
+
+---
+
+### 7.1 Add header → upstream routing with `map` (nginx.conf)
+
+Update `deployments/nginx/nginx.conf`:
+
+~~~nginx
+events {
+    worker_connections 1024;
+}
+
+http {
+    # RATE LIMITING (already implemented)
+    limit_req_zone $binary_remote_addr zone=apilimit:10m rate=10r/s;
+
+    # LOAD BALANCING / UPSTREAMS (already implemented)
+    upstream api_v1_pool {
+        server api-v1:8000;  # Compose DNS -> balances across all api-v1 replicas
+    }
+
+    upstream api_v2_single {
+        server api-v2:8000;  # Single debug service
+    }
+
+    # A/B ROUTING/TESTING (step 1/2): choose upstream (and thus api-v) based on request header 
+    # - default -> api_v1_pool 
+    # - debug   -> If client sends: 'X-Experiment-Group: debug' => route to api_v2_single   
+    #   (Header: X-Experiment-Group -> variable: $http_x_experiment_group)
+    map $http_x_experiment_group $predict_upstream {
+        default  api_v1_pool;
+        debug    api_v2_single;
+    }
+
+    # HTTP -> HTTPS redirect (already implemented)
+    server {
+        listen 80;
+        server_name localhost;
+        return 301 https://$host$request_uri;
+    }
+
+    # HTTPS entrypoint (already implemented)
+    server {
+        listen 443 ssl;
+        server_name localhost;
+
+        ssl_certificate /etc/nginx/certs/nginx.crt;
+        ssl_certificate_key /etc/nginx/certs/nginx.key;
+
+        # /predict is protected + rate-limited (already implemented)
+        location /predict {
+            auth_basic "API Access Protected";
+            auth_basic_user_file /etc/nginx/.htpasswd;
+
+            limit_req zone=apilimit burst=5 nodelay;
+
+            # A/B-routing (step 2/2): 
+            # A/B routing based on map result - the A/B routing decision 
+            # happens here (value comes from `map` above)           
+            proxy_pass http://$predict_upstream;
+^
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+~~~
+
+---
+
+### 7.2 Restart + validate routing
+
+~~~bash
+make stop-all
+make start-project
+
+# Default route (no header) -> api-v1
+curl -s -X POST "https://localhost/predict" \
+  --cacert ./deployments/nginx/certs/nginx.crt \
+  --user admin:admin \
+  -H "Content-Type: application/json" \
+  -d '{"sentence":"I love this!"}'; echo
+
+# Debug route (header present) -> api-v2
+curl -s -X POST "https://localhost/predict" \
+  --cacert ./deployments/nginx/certs/nginx.crt \
+  --user admin:admin \
+  -H "X-Experiment-Group: debug" \
+  -H "Content-Type: application/json" \
+  -d '{"sentence":"I love this!"}'; echo
+
+# Confirm by watching logs in parallel (two terminals)
+docker compose -p mlops-exam logs -f api-v1
+docker compose -p mlops-exam logs -f api-v2
+~~~
+
+### 7.3 Optional Makefile helpers (two quick A/B smoke tests)
+
+```bash
+# Smoke test: default path (without debug header) hits v1 (no experiment header)
+test-ab-v1:
+	@curl -s -X POST "https://localhost/predict" \
+		--cacert ./deployments/nginx/certs/nginx.crt \
+		--user admin:admin \
+		-H "Content-Type: application/json" \
+		-d '{"sentence":"I love this!"}'; echo
+
+# Smoke test: debug header triggers v2 (debug path)
+test-ab-v2:
+	@curl -s -X POST "https://localhost/predict" \
+		--cacert ./deployments/nginx/certs/nginx.crt \
+		--user admin:admin \
+		-H "X-Experiment-Group: debug" \
+		-H "Content-Type: application/json" \
+		-d '{"sentence":"I love this!"}'; echo
+```
+
+ 
+
+
+---
