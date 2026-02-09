@@ -394,14 +394,17 @@ In `deployments/nginx/nginx.conf` (inside the `http { ... }` block):
 In `Makefile`:
 
 ~~~makefile
-# Start full stack (LB milestone): scale api-v1 to 3 replicas (plain docker compose)
-# Note: We use --scale instead of docker-compose `deploy.replicas` because `deploy` is Swarm-oriented
-# and may be ignored by plain `docker compose up` in many environments. --scale works consistently here.
+# Start full stack with Loadbalancing: scale api-v1 to 3 replicas (plain docker compose)
+#
+# Note: We use --scale instead of `deploy.replicas` in the docker-compose-config.   
+# Reason: `deploy.replicas` is primarily a Swarm-oriented field and is not consistently applied 
+# in plain `docker compose` workflows across environments - it may be ignored by plain `docker compose up` 
+# in some environments - whereas --scale works consistently. 
+# Using `--scale` is explicit, works with regular Compose, and keeps the exam stack portable.
 start-project:
 	docker compose -p mlops-exam up -d --build --scale api-v1=3
 ~~~
 
----
 
 ### 3.4 Test load balancing evidence (replicas + logs)
 
@@ -759,3 +762,97 @@ test-auth-ok:
 		exit 1; \
 	fi
 ~~~
+
+
+---
+
+## 6. Rate Limiting: Protect /predict from overload (10 req/s per IP)
+
+### TL;DR (step specific): Quick reproduce (current milestone: bursty calls trigger 503)
+
+~~~bash
+# Restart stack (after config changes)
+make stop-all
+make start-project
+
+# 1) Authenticated burst test (expect some 200s and some 503s once limit kicks in)
+make test-rate-limit
+
+# 2) Inspect Nginx logs (should show "limiting requests" lines)
+make logs-nginx
+~~~
+
+---
+
+### 6.1 Add rate limit zone (http block) + apply it to /predict (location block)
+
+Update `deployments/nginx/nginx.conf`:
+
+~~~nginx
+http {
+    # RATE LIMITING: track request rate per client IP
+    # - zone name: apilimit
+    # - memory: 10m
+    # - rate: 10 requests/second per IP
+    limit_req_zone $binary_remote_addr zone=apilimit:10m rate=10r/s;
+
+    # ... keep upstreams + servers as-is ...
+
+    server {
+        listen 443 ssl;
+        server_name localhost;
+
+        # ... keep TLS settings as-is ...
+
+        location /predict {
+            # Basic Auth (already implemented)
+            auth_basic "API Access Protected";
+            auth_basic_user_file /etc/nginx/.htpasswd;
+
+            # Apply rate limiting to this endpoint only
+            # burst=5 allows short spikes; requests beyond that are rejected (503)
+            limit_req zone=apilimit burst=5 nodelay;
+
+            proxy_pass http://api_v1_pool;
+
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+~~~
+
+---
+
+### 6.2 Add Makefile helper: burst test (prints a simple pass/fail summary) + run tests
+
+Update `Makefile`:
+
+~~~makefile
+# Burst test: hit /predict multiple times quickly.
+# Expectation: at least one 200 AND at least one 503 once rate limiting triggers.
+test-rate-limit:
+	@ok=0; limited=0; \
+	for i in $$(seq 1 20); do \
+		code=$$(curl -s -o /dev/null -w "%{http_code}" \
+			-X POST "https://localhost/predict" \
+			--cacert ./deployments/nginx/certs/nginx.crt \
+			--user admin:admin \
+			-H "Content-Type: application/json" \
+			-d '{"sentence":"I love this!"}'); \
+		[ "$$code" = "200" ] && ok=1; \
+		[ "$$code" = "503" ] && limited=1; \
+	done; \
+	if [ $$ok -eq 1 ] && [ $$limited -eq 1 ]; then \
+		echo "PASS: rate limiting active (saw 200 and 503)"; \
+	else \
+		echo "FAIL: expected both 200 and 503 (ok=$$ok limited=$$limited)"; \
+		exit 1; \
+	fi
+~~~
+
+---
+
+

@@ -74,7 +74,7 @@ logs-api-v1:
 
 # 🛡️ View only Nginx logs (To see Rate Limiting in action)
 logs-nginx:
-	docker logs -f nginx_revproxy
+	docker compose -p mlops-exam logs -f nginx
 
 
 # 📋 Show running services/containers for this compose project
@@ -189,5 +189,26 @@ test-auth-ok:
 		echo "PASS: auth accepted (200)"; \
 	else \
 		echo "FAIL: expected 200, got $$code"; \
+		exit 1; \
+	fi
+
+# Burst test: hit /predict multiple times quickly.
+# Expectation: at least one 200 AND at least one 503 once rate limiting triggers.
+test-rate-limit:
+	@ok=0; limited=0; \
+	for i in $$(seq 1 20); do \
+		code=$$(curl -s -o /dev/null -w "%{http_code}" \
+			-X POST "https://localhost/predict" \
+			--cacert ./deployments/nginx/certs/nginx.crt \
+			--user admin:admin \
+			-H "Content-Type: application/json" \
+			-d '{"sentence":"I love this!"}'); \
+		[ "$$code" = "200" ] && ok=1; \
+		[ "$$code" = "503" ] && limited=1; \
+	done; \
+	if [ $$ok -eq 1 ] && [ $$limited -eq 1 ]; then \
+		echo "PASS: rate limiting active (saw 200 and 503)"; \
+	else \
+		echo "FAIL: expected both 200 and 503 (ok=$$ok limited=$$limited)"; \
 		exit 1; \
 	fi

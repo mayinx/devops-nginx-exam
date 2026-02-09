@@ -3,6 +3,9 @@ services:
   # 🧠 THE ENGINE(S): FastAPI services
 
   # 🧠 Service v1
+  # NOTE: We scale with `docker compose ... --scale api-v1=3` (works with normal Docker Compose) instead of `deploy.replicas`.
+  # `deploy.replicas` comes from Docker Swarm mode (Docker’s built-in cluster/orchestrator). In plain Compose it may be ignored
+  # (or behave inconsistently), so `--scale` is the safest/most portable way for this exam setup.
   api-v1:
     build:
       context: .
