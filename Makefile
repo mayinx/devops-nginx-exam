@@ -46,8 +46,12 @@ stop-api-v2:
 # ==============================================================================
 
 # Launch everything: 3x API replicas, Nginx, Exporter, Prometheus, Grafana
+# start-project:
+# 	docker compose -p mlops-exam up -d --build
+# TODO: We use --scale here instead of the replcias-option in docker-compose, 
+# since using replicas alone is risky when it comes to portability
 start-project:
-	docker compose -p mlops-exam up -d --build
+	docker compose -p mlops-exam up -d --build --scale api-v1=3
 
 # Shutdown the entire stack and remove internal networks
 stop-project:
@@ -58,11 +62,91 @@ stop-all:
 	docker compose -p mlops-exam down --remove-orphans
 
 
+### inspecting
 
 # 📋 View real-time logs for the whole stack (Handy for debugging!)
 logs:
 	docker compose -p mlops-exam logs -f
 
+# 🔎 Follow logs for the api-v1 service (shows output across replicas)
+logs-api-v1:
+	docker compose -p mlops-exam logs -f api-v1
+
 # 🛡️ View only Nginx logs (To see Rate Limiting in action)
 logs-nginx:
 	docker logs -f nginx_revproxy
+
+
+# 📋 Show running services/containers for this compose project
+ps:
+	docker compose -p mlops-exam ps
+
+# 📋 Show only the scaled api-v1 replica containers (quick sanity-check for LB)
+ps-api-v1:
+	docker compose -p mlops-exam ps api-v1
+
+
+# ## testing 	
+
+# 🧪 Base smoke test: hit /predict via Nginx entrypoint (HTTP)
+test-base:
+	@curl -s -X POST "http://localhost:8080/predict" \
+		-H "Content-Type: application/json" \
+		-d '{"sentence":"I love this!"}'; echo
+
+# 🧪 Burst test: send N requests via Nginx (useful to observe LB distribution)
+# Usage: make test-burst            (defaults to 20)
+#        make test-burst N=50       (custom burst size)
+test-burst:
+	@N=$${N:-20}; \
+	for i in $$(seq 1 $$N); do \
+		curl -s -X POST "http://localhost:8080/predict" \
+			-H "Content-Type: application/json" \
+			-d '{"sentence":"I love this!"}' >/dev/null; \
+	done; \
+	echo "Sent $$N requests to /predict via Nginx."
+
+
+
+## certs handling + testing
+#  to wrap the long openssl + curl --cacert commands into make targets. 
+#  TLS setup and verification become easy reproducible and consistent across reruns 
+# => less copy/paste + fewer mistakes  
+
+
+# Generate self-signed certs for localhost (HTTPS milestone)
+gen-certs:
+	mkdir -p deployments/nginx/certs
+	openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+		-keyout deployments/nginx/certs/nginx.key \
+		-out deployments/nginx/certs/nginx.crt \
+		-subj "/CN=localhost"
+
+# HTTPS smoke test via Nginx (verifies against our self-signed cert)
+test-project-https:
+	curl -s -X POST "https://localhost/predict" \
+		--cacert ./deployments/nginx/certs/nginx.crt \
+		-H "Content-Type: application/json" \
+		-d '{"sentence":"I love this!"}'; echo
+
+# HTTP must not serve the API directly: it must redirect to HTTPS (301/308 + Location: https://...)
+# Pass criteria:
+# - Status code is 301 or 308
+# - Location header starts with https://
+# What this does:
+# - curl #1: fetch only the HTTP status code (no body) into `code`
+# - curl #2: fetch headers only and extract the Location header into `loc`
+# - PASS if code is 301/308 AND Location starts with https://, else FAIL (exit 1)
+# Notes:
+# - awk = small CLI text parser; here it splits header lines on ": " and prints the Location value (URL) only
+# - $$ is required in Makefiles to pass a literal $ to the shell/awk
+# - tr -d '\r' removes CR from HTTP headers (CRLF) so matching works reliably
+test-http-redirect:
+	@code=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/predict); \
+	loc=$$(curl -sI http://localhost:8080/predict | awk -F': ' 'tolower($$1)=="location"{print $$2}' | tr -d '\r'); \
+	if ([ "$$code" = "301" ] || [ "$$code" = "308" ]) && echo "$$loc" | grep -q '^https://'; then \
+		echo "PASS: HTTP -> HTTPS redirect ($$code, $$loc)"; \
+	else \
+		echo "FAIL: expected HTTP->HTTPS redirect, got code=$$code location=$$loc"; \
+		exit 1; \
+	fi		
