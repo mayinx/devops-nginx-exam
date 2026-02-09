@@ -1007,7 +1007,266 @@ test-ab-v2:
 		-d '{"sentence":"I love this!"}'; echo
 ```
 
+---
+
+## 8. Monitoring (Bonus): Prometheus + Grafana for Nginx metrics (stub_status + exporter)
+
+### TL;DR (step specific): Quick reproduce (current milestone: metrics visible + Grafana reachable)
+
+~~~bash
+# Start the full stack
+make start-project
+
+# Check exporter is up (should return Prometheus-formatted metrics)
+curl -s http://localhost:9113/metrics | head
+
+# Open UIs:
+# - Prometheus: http://localhost:9090
+# - Grafana:    http://localhost:3000  (login: admin / admin)
+
+# Stop
+make stop-all
+~~~
+
+> Note: We intentionally scrape Nginx status over **internal HTTP** (inside the Compose network) to avoid HTTPS + self-signed certificate headaches for the exporter.
+
+---
+
+### 8.1 Add an internal-only Nginx status endpoint (nginx.conf)
+
+Update `deployments/nginx/nginx.conf`:
+
+~~~nginx
+events {
+    worker_connections 1024;
+}
+
+http {
+    # RATE LIMITING: define shared limit zone (step 6)
+    limit_req_zone $binary_remote_addr zone=apilimit:10m rate=10r/s;
+
+    # A/B ROUTING: choose upstream based on header (step 7)
+    map $http_x_experiment_group $predict_upstream {
+        default  api_v1_pool;
+        debug    api_v2_single;
+    }
+
+    upstream api_v1_pool {
+        server api-v1:8000;
+    }
+
+    upstream api_v2_single {
+        server api-v2:8000;
+    }
+
+    # HTTP (host port 8080): redirect-only
+    server {
+        listen 80;
+        server_name localhost;
+        return 301 https://$host$request_uri;
+    }
+
+    # HTTPS (host port 443): real API entrypoint
+    server {
+        listen 443 ssl;
+        server_name localhost;
+
+        ssl_certificate     /etc/nginx/certs/nginx.crt;
+        ssl_certificate_key /etc/nginx/certs/nginx.key;
+
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+
+        location /predict {
+            # Basic Auth (step 5)
+            auth_basic "API Access Protected";
+            auth_basic_user_file /etc/nginx/.htpasswd;
+
+            # Rate limiting (step 6)
+            limit_req zone=apilimit burst=5 nodelay;
+
+            # A/B routing (step 7)
+            proxy_pass http://$predict_upstream;
+
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+
+    # INTERNAL METRICS ENDPOINT (not published to host)
+    # - separate listener to avoid the HTTP->HTTPS redirect loop for the exporter
+    # - allow only loopback + Docker private ranges (portable across Compose subnets)
+    server {
+        listen 8081;
+        server_name nginx;
+
+        location /nginx_status {
+            stub_status on;
+            access_log off;
+
+            allow 127.0.0.1;
+            allow 172.16.0.0/12;
+            allow 192.168.0.0/16;
+            deny all;
+        }
+    }
+}
+~~~
+
+---
+
+### 8.2 Add services: nginx_exporter + prometheus + grafana (docker-compose.yml)
+
+Update `docker-compose.yml` (append these services; keep existing ones unchanged):
+
+~~~yaml
+services:
+  # NOTE: We scale with `docker compose ... --scale api-v1=3` (portable Compose)
+  # instead of `deploy.replicas` (Swarm mode feature; may be ignored by plain `docker compose`).
+  api-v1:
+    build:
+      context: .
+      dockerfile: src/api/v1/Dockerfile
+    expose:
+      - "8000"
+
+  api-v2:
+    build:
+      context: .
+      dockerfile: src/api/v2/Dockerfile
+    expose:
+      - "8000"
+
+  nginx:
+    build:
+      context: deployments/nginx/
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"   # HTTP (redirect-only)
+      - "443:443"   # HTTPS entrypoint
+    volumes:
+      - ./deployments/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deployments/nginx/certs:/etc/nginx/certs:ro
+      - ./deployments/nginx/.htpasswd:/etc/nginx/.htpasswd:ro
+    depends_on:
+      - api-v1
+      - api-v2
+
+  nginx_exporter:
+    image: nginx/nginx-prometheus-exporter:latest
+    ports:
+      - "9113:9113" # expose exporter to host for quick checking
+    depends_on:
+      - nginx
+    command:
+      - "--nginx.scrape-uri=http://nginx:8081/nginx_status"
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deployments/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - nginx_exporter
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+
+volumes:
+  prometheus_data:
+  grafana_data:
+~~~
+
+---
+
+### 8.3 Add Prometheus scrape config (prometheus.yml)
+
+Create `deployments/prometheus/prometheus.yml`:
+
+~~~yaml
+global:
+  scrape_interval: 3s
+
+scrape_configs:
+  - job_name: "nginx-exporter"
+    static_configs:
+      - targets: ["nginx_exporter:9113"]
+~~~
+
+---
+
+### 8.4 Start + verify metrics
+
+~~~bash
+make stop-all
+make start-project
+
+# Exporter metrics should be readable
+curl -s http://localhost:9113/metrics | head
+
+# Prometheus UI: http://localhost:9090
+# Grafana UI:    http://localhost:3000  (admin/admin)
+~~~
+
+---
+
+### 8.5 Grafana setup (minimal)
+
+1) Open Grafana → login `admin / admin`  
+2) Connections → Data sources → Add data source → **Prometheus**  
+3) URL: `http://prometheus:9090` → **Save & Test**  
+4) Optional: Import a ready dashboard:
+   - Dashboards → New → Import → enter dashboard ID `12708` (Nginx exporter) → Import
+
+---
  
+
+### 8.6 Verify Monitoring end-to-end
+
+```bash 
+# 1) Generate some traffic (hits both auth + AB + rate limit paths)
+make test-ab-v1
+make test-ab-v2
+make test-rate-limit
+
+# Optional: create a short burst to see rate-limit logs (some 503s expected)
+for i in {1..30}; do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -X POST "https://localhost/predict" \
+    --cacert ./deployments/nginx/certs/nginx.crt \
+    --user admin:admin \
+    -H "Content-Type: application/json" \
+    -d '{"sentence":"Oh yeah, that was soooo cool!"}' &
+done; wait
+
+# 2) Check exporter metrics directly (host)
+curl -s http://localhost:9113/metrics | head
+
+# 3) Prometheus: confirm targets are UP
+# Open in browser: http://localhost:9090/targets
+
+# 4) Quick Prometheus query ideas (browser -> Graph/Query):
+# - nginx_up
+# - nginx_connections_active
+# - rate(nginx_http_requests_total[1m])
+
+# 5) Grafana: open UI, add Prometheus datasource, import dashboard 12708
+# http://localhost:3000  (admin / admin)
+```
 
 
 ---
