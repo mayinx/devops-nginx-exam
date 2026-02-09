@@ -574,7 +574,7 @@ http {
 
 ---
 
-### 4.6 Add Makefile helpers (cert generation + HTTPS smoke test)
+### 4.6 Add Makefile helpers (cert generation + HTTPS smoke test) + run tests
 
 - Update `Makefile` to wrap the long openssl + curl --cacert commands into make targets. 
 - This way TLS setup and verification are easy reproducible and consistent across reruns => less copy/paste + fewer mistakes  
@@ -606,4 +606,156 @@ test-http-redirect:
 		exit 1; \
 	fi
 
+~~~
+
+
+
+---
+
+## 5. Access Control: Protect /predict with Basic Auth (.htpasswd)
+
+### TL;DR (step specific): Quick reproduce (current milestone: /predict requires username+password)
+
+~~~bash
+# 1) Create credentials file (one-time)
+make gen-htpasswd
+
+# 2) Restart stack
+make stop-all
+make start-project
+
+# 3) Without credentials -> must fail (401)
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -X POST "https://localhost/predict" \
+  --cacert ./deployments/nginx/certs/nginx.crt \
+  -H "Content-Type: application/json" \
+  -d '{"sentence":"I love this!"}'
+
+# 4) With credentials -> must succeed (200 + JSON)
+curl -s -X POST "https://localhost/predict" \
+  --cacert ./deployments/nginx/certs/nginx.crt \
+  --user admin:admin \
+  -H "Content-Type: application/json" \
+  -d '{"sentence":"I love this!"}'; echo
+~~~
+
+---
+
+### 5.1 Generate the `.htpasswd` file (credentials store for Nginx)
+
+Create / update `deployments/nginx/.htpasswd`:
+
+~~~bash
+# Creates the .htpasswd-file (-c) and adds user "admin"
+# When prompted, enter a password (e.g. 'admin' for simplicity/demo)
+htpasswd -c deployments/nginx/.htpasswd admin
+~~~
+
+If we would add more users later, we would do that without `-c` (since the file already exists):
+~~~bash
+htpasswd deployments/nginx/.htpasswd username
+~~~
+
+---
+
+### 5.2 Update docker-compose.yml to mount `.htpasswd` into the Nginx container
+
+Update `docker-compose.yml` (Nginx service volumes):
+
+~~~yaml
+    volumes:
+      - ./deployments/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deployments/nginx/certs:/etc/nginx/certs:ro
+      - ./deployments/nginx/.htpasswd:/etc/nginx/.htpasswd:ro
+~~~
+
+---
+
+### 5.3 (Optional) Also COPY certs + .htpasswd into the Nginx image (standalone / prod-like)
+
+> Why (optional)?  
+> With bind-mounts, Nginx reads config/certs/auth files directly from the host at runtime (fast iteration).  
+> With `COPY`, those files are baked into the image, so the Nginx container can run **standalone** (no compose file / no host mounts required).  
+> If you keep BOTH: the bind-mounts in `docker-compose.yml` will **override** the baked-in files at the same paths.
+
+Update `deployments/nginx/Dockerfile` (add the COPY lines):
+
+~~~Dockerfile
+FROM nginx:latest
+
+# Optional: bake nginx,config certs + htpasswd into the image as defaults (useful if the image is run without docker-compose)
+# (docker-compose bind-mounts override these at runtime, but this makes the image portable/standalone)
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY certs/ /etc/nginx/certs/
+COPY .htpasswd /etc/nginx/.htpasswd
+
+EXPOSE 80
+EXPOSE 443
+CMD ["nginx", "-g", "daemon off;"]
+~~~
+
+---
+
+
+### 5.4 Enable Basic Auth on `/predict` in nginx.conf
+
+Update `deployments/nginx/nginx.conf` (inside the HTTPS server’s `location /predict` block):
+
+~~~nginx
+location /predict {
+    # Basic Auth: protect this endpoint with username/password
+    auth_basic "API Access Protected";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    proxy_pass http://api_v1_pool;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+~~~
+
+---
+
+### 5.5 Add Makefile helpers (generate credentials + smoke tests) + run tests
+
+Update `Makefile`:
+
+~~~makefile
+# Create/update Basic Auth file for Nginx (/predict protection)
+# Requires: htpasswd (package name on Ubuntu/Debian: apache2-utils)
+gen-htpasswd:
+	@mkdir -p deployments/nginx
+	@htpasswd -bc deployments/nginx/.htpasswd admin admin
+	@echo "OK: deployments/nginx/.htpasswd created (admin/admin)"
+
+# Smoke test: /predict must return 401 without credentials
+test-auth-required:
+	@code=$$(curl -s -o /dev/null -w "%{http_code}" \
+		-X POST "https://localhost/predict" \
+		--cacert ./deployments/nginx/certs/nginx.crt \
+		-H "Content-Type: application/json" \
+		-d '{"sentence":"I love this!"}'); \
+	if [ "$$code" = "401" ]; then \
+		echo "PASS: auth required (401)"; \
+	else \
+		echo "FAIL: expected 401, got $$code"; \
+		exit 1; \
+	fi
+
+# Smoke test: /predict must succeed with credentials
+test-auth-ok:
+	@code=$$(curl -s -o /dev/null -w "%{http_code}" \
+		-X POST "https://localhost/predict" \
+		--cacert ./deployments/nginx/certs/nginx.crt \
+		--user admin:admin \
+		-H "Content-Type: application/json" \
+		-d '{"sentence":"I love this!"}'); \
+	if [ "$$code" = "200" ]; then \
+		echo "PASS: auth accepted (200)"; \
+	else \
+		echo "FAIL: expected 200, got $$code"; \
+		exit 1; \
+	fi
 ~~~

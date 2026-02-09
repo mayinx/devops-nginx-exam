@@ -124,8 +124,9 @@ gen-certs:
 
 # HTTPS smoke test via Nginx (verifies against our self-signed cert)
 test-project-https:
-	curl -s -X POST "https://localhost/predict" \
+	@curl -s -X POST "https://localhost/predict" \
 		--cacert ./deployments/nginx/certs/nginx.crt \
+		--user admin:admin \
 		-H "Content-Type: application/json" \
 		-d '{"sentence":"I love this!"}'; echo
 
@@ -150,3 +151,43 @@ test-http-redirect:
 		echo "FAIL: expected HTTP->HTTPS redirect, got code=$$code location=$$loc"; \
 		exit 1; \
 	fi		
+
+
+## auth related
+
+
+# Create/update Basic Auth file for Nginx (/predict protection)
+# Requires: htpasswd (package name on Ubuntu/Debian: apache2-utils)
+gen-htpasswd:
+	@mkdir -p deployments/nginx
+	@htpasswd -bc deployments/nginx/.htpasswd admin admin
+	@echo "OK: deployments/nginx/.htpasswd created (admin/admin)"
+
+# Smoke test: /predict must return 401 without credentials
+test-auth-required:
+	@code=$$(curl -s -o /dev/null -w "%{http_code}" \
+		-X POST "https://localhost/predict" \
+		--cacert ./deployments/nginx/certs/nginx.crt \
+		-H "Content-Type: application/json" \
+		-d '{"sentence":"I love this!"}'); \
+	if [ "$$code" = "401" ]; then \
+		echo "PASS: auth required (401)"; \
+	else \
+		echo "FAIL: expected 401, got $$code"; \
+		exit 1; \
+	fi
+
+# Smoke test: /predict must succeed with credentials
+test-auth-ok:
+	@code=$$(curl -s -o /dev/null -w "%{http_code}" \
+		-X POST "https://localhost/predict" \
+		--cacert ./deployments/nginx/certs/nginx.crt \
+		--user admin:admin \
+		-H "Content-Type: application/json" \
+		-d '{"sentence":"I love this!"}'); \
+	if [ "$$code" = "200" ]; then \
+		echo "PASS: auth accepted (200)"; \
+	else \
+		echo "FAIL: expected 200, got $$code"; \
+		exit 1; \
+	fi

@@ -27,15 +27,35 @@ services:
     build:
       context: deployments/nginx/
       dockerfile: Dockerfile
-    # Publish HTTP entrypoint to host (use 8080 locally to avoid clashing with system port 80).  
+    # Publish container ports to the host:
+    # - 8080 on the host forwards to Nginx port 80 in the container (HTTP, redirect-only)
+    # - 443 on the host forwards to Nginx port 443 in the container (HTTPS entrypoint)    
     ports:
       - "8080:80"  # HTTP (used only to redirect -> HTTPS)
       - "443:443"  # HTTPS (Port 443 - standard TLS port) for secure communication
     volumes:
-      # Mount config read-only so changes to nginx.conf take effect on container restart.
+      # Bind-mount repo files/folders INTO the container so Nginx can read them, 
+      #
+      # But: The files are NOT copied into the image (i.e. this is not the same then 
+      # the COPY-Command in dockerfiles which build time (docker build):
+      # Instead, with bind-mount, Nginx reads the following files directly from the hosts's 
+      # filesystem at runtime (docker compose up) which OVERRIDES anything we may have COPY'd 
+      # in the Dockerfile at the same path. The nginx-container can see aby change on those files
+      # on the host immediately. 
+      # This is useful for fast iteration (edit file -> restart/reload Nginx, no need to rebuild).
+      #
+      # Syntax: host_path : container_path
+      # :ro = read-only (container cannot modify your repo files)
+      #
+      #
+      # nginx.conf -> main config file that Nginx loads on startup
       - ./deployments/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+      # certs/ -> provides nginx.crt + nginx.key at the exact paths used in nginx.conf
       - ./deployments/nginx/certs:/etc/nginx/certs:ro
-      # - ./deployments/nginx/.htpasswd:/etc/nginx/.htpasswd:ro
+
+      # .htpasswd -> credential hash file used by auth_basic_user_file in nginx.conf
+      - ./deployments/nginx/.htpasswd:/etc/nginx/.htpasswd:ro
     depends_on:
       - api-v1
       - api-v2
