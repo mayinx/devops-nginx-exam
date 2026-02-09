@@ -1,167 +1,195 @@
+# 🏛️ MLOps Exam Project: Sentiment API Gateway "The Fortress"
+### Scalable • Secure • Observable deployment with Nginx + Docker Compose
+
+## 🎭 Tech Stack
+🐋 **Docker / Compose** | 🛡️ **Nginx** (Gateway, TLS, Auth, LB, Rate Limit, A/B) | 🐍 **FastAPI** (v1 + v2) | 🔥 **Prometheus** | 📊 **Grafana**
+
+---
+
+## 🎯 What this project demonstrates (Exam Objectives)
+This repository implements the exam requirements:
+
+1. **Reverse Proxy**: Nginx is the single entry point for `/predict`.
+2. **Load Balancing**: `api-v1` runs as **3 replicas** behind an Nginx upstream.
+3. **HTTPS**: TLS termination on Nginx with **self-signed certs**; HTTP redirects to HTTPS.
+4. **Access Control**: `/predict` protected by **Basic Auth**.
+5. **Rate Limiting**: `/predict` limited to protect the backend.
+6. **A/B Testing**: `api-v2` is used **only** when header `X-Experiment-Group: debug` is present.
+7. **Monitoring (Bonus)**: Nginx metrics → exporter → Prometheus → Grafana.
+
+---
+
+## 🏗️ Architecture (Requests + Metrics)
+
+~~~text
+        [ CLIENT ]
+             |
+         HTTPS :443
+             |
+   +---------v----------+
+   |  🛡️ NGINX GATEWAY  |
+   | TLS / Auth / RL /  |
+   | LB / A/B routing   |
+   +----+----------+----+
+        |          |
+        |          +-------------------+
+        |                              |
+        v                              v
++-------------------+          +-------------------+
+| 🐍 api-v1 (x3)    |          | 🐍 api-v2 (debug) |
+| load-balanced     |          | header-triggered  |
++-------------------+          +-------------------+
 
 
-# Doc of implementation steps
+   Metrics (pull-based; internal status is NOT published to host):
 
-## 1. API-service: Get the 2 api containers/services running and functional
+             ┌────────────────────────┐
+             │ 🎨 Grafana dashboards  │  :3000
+             │ queries Prometheus API │
+             └───────────┬────────────┘
+                         │ Prometheus query API (READ)
+                         v   
 
-### Create two dockerfiles (one for each api-vbersion), list requirements + test  
+                   (1) scrape_interval
+        ┌───────────────────────────────────────────┐
+        │ 🔥 Prometheus                             │ :9090
+        │ schedules scrapes + scrapes reporter      │
+        │ + stores time series                      │
+        └───────────────┬───────────────────────────┘
+                        │  (2) HTTP GET /metrics  (PULL)
+                        v
+               ┌───────────────────────┐
+               │ 📊 nginx_exporter     │  :9113
+               │ converts Nginx stats  │
+               └───────────┬───────────┘
+                           │  (3) HTTP GET /nginx_status (PULL)
+                           v
+               ┌───────────────────────────┐
+               │ 🛡️ NGINX :8081            │
+               │ /nginx_status (stub)      │
+               │ allow: 127.0.0.1 + RFC1918│
+               └───────────────────────────┘
 
-#### A) src/api/v1/Dockerfile:
+~~~
 
-```Dockerfile
-FROM python:3.12-slim
+---
 
-WORKDIR /app
+## 📁 Project Structure (high level)
 
-COPY src/api/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+~~~bash
+.
+├── deployments/
+│   ├── nginx/
+│   │   ├── Dockerfile
+│   │   ├── nginx.conf
+│   │   ├── .htpasswd
+│   │   └── certs/ (generated locally)
+│   └── prometheus/
+│       └── prometheus.yml
+├── model/
+│   └── model.joblib
+├── src/
+│   └── api/
+│       ├── requirements.txt
+│       ├── v1/ (FastAPI app + Dockerfile)
+│       └── v2/ (FastAPI app + Dockerfile)
+├── tests/
+│   └── run_tests.sh
+├── docker-compose.yml
+├── Makefile
+~~~
 
-COPY model/model.joblib .
-COPY src/api/v1/main.py . 
+---
 
-EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
+## 🚀 Quick Start
 
-#### B) src/api/v2/Dockerfile:
+### 1) Generate TLS certificates (self-signed)
+~~~bash
+make gen-certs
+~~~
 
-```Dockerfile
-FROM python:3.12-slim
-
-WORKDIR /app
-
-COPY src/api/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY model/model.joblib .
-COPY src/api/v2/main.py . 
-
-EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-
-### List requirements
-
-in `mlops-nginx-exam-2/src/api/requirements.txt`:
-
-```bash
-joblib==1.5.1
-numpy==2.2.6
-fastapi==0.115.12
-scikit-learn==1.6.1 # To use our model
-uvicorn==0.34.3 # To launch our API
-```
-
-### Test api-v1
-
-#### A) Build image from Dockerfile 
-
-```bash
-# Build the repo image from repo root (i.e. behold the trailing dot): 
-# -f src/api/v1/Dockerfile = where the Dockerfile lives
-# . = repo root build context, so Docker can access model/ 
-#    and src/api/ from within the Dockerfile...
- docker build -t api-v1 -f src/api/v1/Dockerfile .
- ```
-
-#### B) Run the container
-
-```bash
-docker run --rm -d --name api-v1 -p 8001:8000 api-v1  
-```
-
-##### C) Call the endpoint 
-
-```bash
-curl -s -X POST "http://localhost:8001/predict" \
-  -H "Content-Type: application/json" \
-  -d '{"sentence":"I love this!"}'
-```
-
-Should produce 
-
-```bash
-{"prediction value":"love"}`
-```
-
-### Test api-v2
-
-Dito - just align the commands (and port) with the requriemnents for api-v2:
-
-```bash
-# Build only the API image
-docker build -t api-v2 -f src/api/v2/Dockerfile .	
-
-# Run the API as a standalone container (maps port 8000 to 8000)
-docker run --rm -d --name api-v2 -p 8002:8000 api-v2
-
-# Test API
-curl -s -X POST "http://localhost:8002/predict" \
--H "Content-Type: application/json" \
--d '{"sentence":"I love this!"}'
-```
-
-### Add composer config for the two api-servcies
-
-```bash
-services:
-
-  # 🧠 THE ENGINE: FastAPI application
-  # feat(api): containerize v1 and v2 services and validate /predict
-  mlops-exam-sentiment-api-v1:
-    build:
-      context: .
-      dockerfile: src/api/v1/Dockerfile 
-    ports: # dev-only direct test (see README)
-    - "8001:8000" # Internal port only. Public access is blocked except via Nginx.
-
-  mlops-exam-sentiment-api-v2:
-    build:
-      context: .
-      dockerfile: src/api/v2/Dockerfile 
-    ports: # dev-only direct test (see README)
-    - "8002:8000" # Internal port only. Public access is blocked except via Nginx.
-```
-
-
-### add makefile shortcuts
-
-```makefile
-# Launch everything: 3x API replicas, Nginx, Exporter, Prometheus, Grafana
-start-project:
-	docker compose -p mlops-exam up -d --build
-
-# Shutdown the entire stack and remove internal networks
-stop-project:
-	docker compose -p mlops-exam down
-```
-
-### test 
-
-```bash
-# build + run both api sevrices
+### 2) Start the full stack (includes api-v1 scaled to 3)
+~~~bash
 make start-project
+make links
+~~~
 
-# Test API v1
-curl -s -X POST "http://localhost:8001/predict" \
--H "Content-Type: application/json" \
--d '{"sentence":"I love this!"}'
+### 3) Run the exam validation - expected all green of course ;-)  
+~~~bash
+make test
+~~~
 
-# Test API v2
-curl -s -X POST "http://localhost:8002/predict" \
--H "Content-Type: application/json" \
--d '{"sentence":"I love this!"}'
-
-
-# build + run both api sevrices
+### 4) Stop everything
+~~~bash
 make stop-project
-```
+~~~
+
+---
+
+## 🔐 API Usage
+
+### ✅ Default call (routes to v1)
+~~~bash
+curl -s -X POST "https://localhost/predict" \
+  --cacert ./deployments/nginx/certs/nginx.crt \
+  --user admin:admin \
+  -H "Content-Type: application/json" \
+  -d '{"sentence": "Oh yeah, that was soooo cool!"}'
+~~~
+
+### 🧪 A/B debug route (forces v2)
+~~~bash
+curl -s -X POST "https://localhost/predict" \
+  --cacert ./deployments/nginx/certs/nginx.crt \
+  --user admin:admin \
+  -H "X-Experiment-Group: debug" \
+  -H "Content-Type: application/json" \
+  -d '{"sentence": "Oh yeah, that was soooo cool!"}'
+~~~
+
+---
+
+## 🚦 Rate limiting behavior (expected)
+A burst of requests should produce a mix of **200** and **503** once the limit is exceeded.  
+The automated test suite (`make test`) includes a burst step and checks that the service remains available.
+
+---
+
+## 📊 Monitoring (Bonus)
+
+- **Exporter**: http://localhost:9113/metrics  
+- **Prometheus**: http://localhost:9090  
+- **Grafana**: http://localhost:3000  (admin / admin)
+
+In Prometheus, check `/targets` → exporter should be **UP**.
+
+---
+
+## ✅ Make targets (most useful)
+
+- `make start-project` — build + start full stack (api-v1 scaled to 3)
+- `make stop-project` — stop stack
+- `make test` — run `tests/run_tests.sh` (grader entry point)
+- `make logs` — follow logs
+- `make links` — print local URLs
+
+---
+
+## ⚖️ Notes on portability (why the Nginx allowlist is broad in /nginx_status (see nginx.config)
+The internal-only metrics endpoint (`listen 8081` → `/nginx_status`) is **not published to the host**. It is meant to be reachable **only inside the Docker network** (for the exporter), not from the public/host side.
+
+To keep this portable across different Docker/Compose subnets, the allowlist uses RFC1918 private ranges (commonly used by Docker bridge networks) plus loopback:
+- 127.0.0.1 (inside-container calls)
+- 172.16.0.0/12 and 192.168.0.0/16 (RFC1918 private ranges)
+
+RFC1918 explicitly defines the private blocks, including **172.16/12**, and **192.168/16**:
+https://www.rfc-editor.org/rfc/rfc1918.txt
+
+---
 
 
----------------
 
-# Original Exam Instructions:
+# APPENDIX: Original Exam Breif:
 
 ## Instructions pour l'Examen / Exam Instructions
 
