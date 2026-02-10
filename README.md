@@ -189,7 +189,7 @@ https://www.rfc-editor.org/rfc/rfc1918.txt
 
 
 
-# APPENDIX: Original Exam Breif:
+# APPENDIX: Original Exam Brief:
 
 ## Instructions pour l'Examen / Exam Instructions
 

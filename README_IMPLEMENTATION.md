@@ -1,6 +1,22 @@
-# Implementation steps (exam log)
+# Implementation Steps / Exam Log
+
+> ## 👤 About
+> This README contains my personal implementation log (“exam build diary”).  
+> It was created during development to track milestones, decisions, and reproducible commands.  
 
 ---
+
+## 📌 Index 
+- [1) API Services](#1-api-services-get-the-2-api-containersservices-running-and-functional)
+- [2) Reverse Proxy](#2-reverse-proxy-basic-add-nginx-as-single-entrypoint-and-forward-predict-to-the-apis)
+- [3) Load Balancing](#3-load-balancing-scale-api-v1-to-3-replicas-and-balance-requests-via-nginx-upstream-pool)
+- [4) HTTPS Security](#4-https-security-self-signed-tls--redirect-http---https)
+- [5) Access Control](#5-access-control-protect-predict-with-basic-auth-htpasswd)
+- [6) Rate Limiting](#6-rate-limiting-protect-predict-from-overload-10-reqs-per-ip)
+- [7) A/B Testing](#7-ab-testing-route-to-api-v2-only-when-x-experiment-group-debug-is-present)
+- [8) Monitoring](#8-monitoring-bonus-prometheus--grafana-for-nginx-metrics-stub_status--exporter)
+---
+
 
 ## 1. API-services: Get the 2 api containers/services running and functional
 
